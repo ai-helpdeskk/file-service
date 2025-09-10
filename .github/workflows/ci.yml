@@ -1,120 +1,590 @@
-# .github/workflows/ci.yml
-name: CI - Build and Push
+# .github/workflows/file-service-ci.yml
+name: File Service - CI
 
 on:
   push:
     branches: [ main, develop ]
     paths:
-      - '**'
-      - '!README.md'
-      - '!.github/**'
+      - 'file-service/**'
   pull_request:
     branches: [ main ]
+    paths:
+      - 'file-service/**'
+  workflow_dispatch:
 
 env:
-  REGISTRY: docker.io
+  SERVICE_NAME: file-service
   IMAGE_NAME: samitsinghhh/file-service
+  PYTHON_VERSION: '3.11'
+
+defaults:
+  run:
+    working-directory: file-service
 
 jobs:
+  # Lint and Code Quality
+  lint:
+    name: Code Quality & Linting
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install black flake8 bandit safety mypy isort
+
+      - name: Code formatting check
+        run: |
+          black --check --diff --color .
+          isort --check-only --diff --color .
+
+      - name: Lint with flake8
+        run: |
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --max-line-length=120
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics
+
+      - name: Type checking
+        run: |
+          mypy . --ignore-missing-imports --no-strict-optional
+        continue-on-error: true
+
+  # Security Scanning
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install bandit safety
+
+      - name: Run Bandit security scan
+        run: |
+          bandit -r . -f json -o bandit-report.json || true
+          bandit -r . -f txt || true
+
+      - name: Run Safety dependency scan
+        run: |
+          safety check --json --output safety-report.json || true
+          safety check || true
+
+      - name: Upload security reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: security-reports-${{ env.SERVICE_NAME }}
+          path: |
+            file-service/bandit-report.json
+            file-service/safety-report.json
+
+  # Unit Tests
   test:
+    name: Unit Tests
     runs-on: ubuntu-latest
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-        
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pytest pytest-cov
-        
-    - name: Run tests
-      run: |
-        pytest --cov=. --cov-report=xml
-        
-    - name: Upload coverage reports
-      uses: codecov/codecov-action@v3
-      with:
-        file: ./coverage.xml
-
-  build-and-push:
-    runs-on: ubuntu-latest
-    needs: test
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11']
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-      
-    - name: Login to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKER_USERNAME }}
-        password: ${{ secrets.DOCKER_PASSWORD }}
-    
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.IMAGE_NAME }}
-        tags: |
-          type=ref,event=branch
-          type=sha,prefix={{branch}}-
-          type=raw,value=latest,enable={{is_default_branch}}
-    
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-        platforms: linux/amd64,linux/arm64
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Update deployment manifest
-      if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
-      env:
-        GITHUB_TOKEN: ${{ secrets.MANIFEST_REPO_TOKEN }}
-        IMAGE_TAG: ${{ github.sha }}
-      run: |
-        # Clone the k8s-manifests repository
-        git clone https://github.com/${{ github.repository_owner }}/k8s-manifests.git
-        cd k8s-manifests
-        
-        # Configure git
-        git config user.name "GitHub Actions"
-        git config user.email "actions@github.com"
-        
-        # Update the deployment file
-        DEPLOYMENT_FILE="k8s/deployments/file-service-deployment.yaml"
-        
-        # Replace image tag with new SHA
-        sed -i "s|${{ env.IMAGE_NAME }}:.*|${{ env.IMAGE_NAME }}:${{ github.ref_name }}-${IMAGE_TAG}|g" $DEPLOYMENT_FILE
-        
-        # Commit and push changes
-        git add .
-        git commit -m "Update file-service image to ${{ github.ref_name }}-${IMAGE_TAG} [skip ci]" || exit 0
-        git push origin main
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
 
-    - name: Trigger deployment
-      if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
-      run: |
-        ENV="production"
-        if [ "${{ github.ref }}" = "refs/heads/develop" ]; then
-          ENV="staging"
-        fi
-        
-        curl -X POST \
-          -H "Authorization: token ${{ secrets.MANIFEST_REPO_TOKEN }}" \
-          -H "Accept: application/vnd.github.v3+json" \
-          https://api.github.com/repos/${{ github.repository_owner }}/k8s-manifests/dispatches \
-          -d "{\"event_type\":\"deploy-file-service\",\"client_payload\":{\"environment\":\"$ENV\",\"image_tag\":\"${{ github.ref_name }}-${{ github.sha }}\"}}"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov pytest-mock httpx
+
+      - name: Create test file
+        run: |
+          cat > test_main.py << 'EOF'
+          import pytest
+          from fastapi.testclient import TestClient
+          from unittest.mock import patch, MagicMock, mock_open
+          import tempfile
+          import os
+          from pathlib import Path
+          import json
+          from main import app, extract_text_from_file, store_file_info
+
+          client = TestClient(app)
+
+          class TestFileService:
+              def test_root_endpoint(self):
+                  response = client.get("/")
+                  assert response.status_code == 200
+                  data = response.json()
+                  assert "File Service is running" in data["message"]
+                  assert "supported_formats" in data
+                  assert "max_file_size" in data
+
+              def test_health_endpoint(self):
+                  response = client.get("/health")
+                  assert response.status_code == 200
+                  data = response.json()
+                  assert data["status"] == "healthy"
+                  assert data["service"] == "file-service"
+
+              @patch('main.get_db_connection')
+              @patch('main.extract_text_from_file')
+              @patch('main.store_file_info')
+              @patch('builtins.open', new_callable=mock_open)
+              def test_upload_success(self, mock_file, mock_store, mock_extract, mock_db):
+                  # Setup mocks
+                  mock_extract.return_value = "Test content"
+                  mock_store.return_value = {
+                      "id": 1,
+                      "filename": "test.txt",
+                      "original_name": "test.txt",
+                      "file_type": ".txt",
+                      "file_size": 100,
+                      "has_text": True
+                  }
+                  mock_db.return_value = MagicMock()
+
+                  # Create test file
+                  test_content = b"test content"
+                  test_file = ("test.txt", test_content, "text/plain")
+                  
+                  response = client.post(
+                      "/upload",
+                      files={"files": test_file},
+                      data={"session_id": "test-session"}
+                  )
+                  
+                  assert response.status_code == 200
+                  data = response.json()
+                  assert "Successfully uploaded" in data["message"]
+                  assert len(data["files"]) == 1
+
+              def test_upload_invalid_file_type(self):
+                  test_file = ("test.exe", b"binary content", "application/octet-stream")
+                  
+                  response = client.post(
+                      "/upload",
+                      files={"files": test_file},
+                      data={"session_id": "test-session"}
+                  )
+                  
+                  assert response.status_code == 400
+                  assert "not supported" in response.json()["detail"]
+
+              def test_upload_large_file(self):
+                  # Create content larger than 10MB
+                  large_content = b"x" * (11 * 1024 * 1024)  # 11MB
+                  test_file = ("large.txt", large_content, "text/plain")
+                  
+                  response = client.post(
+                      "/upload",
+                      files={"files": test_file},
+                      data={"session_id": "test-session"}
+                  )
+                  
+                  assert response.status_code == 400
+                  assert "too large" in response.json()["detail"]
+
+              def test_upload_missing_session_id(self):
+                  test_file = ("test.txt", b"content", "text/plain")
+                  
+                  response = client.post("/upload", files={"files": test_file})
+                  assert response.status_code == 422  # Validation error
+
+              @patch('main.get_db_connection')
+              def test_get_files_success(self, mock_db):
+                  # Mock database response
+                  mock_cursor = MagicMock()
+                  mock_cursor.fetchall.return_value = [
+                      (1, "file1.txt", "original1.txt", ".txt", 100, "2024-01-01", "text content")
+                  ]
+                  
+                  mock_connection = MagicMock()
+                  mock_connection.cursor.return_value = mock_cursor
+                  mock_db.return_value = mock_connection
+
+                  response = client.get("/files/test-session")
+                  assert response.status_code == 200
+                  data = response.json()
+                  assert "files" in data
+                  assert len(data["files"]) == 1
+                  assert data["files"][0]["filename"] == "original1.txt"
+
+              @patch('main.get_db_connection')
+              def test_get_files_database_error(self, mock_db):
+                  mock_db.return_value = None
+
+                  response = client.get("/files/test-session")
+                  assert response.status_code == 500
+
+              @patch('main.get_db_connection')
+              def test_get_file_content(self, mock_db):
+                  mock_cursor = MagicMock()
+                  mock_cursor.fetchone.return_value = ("test.txt", "file content")
+                  
+                  mock_connection = MagicMock()
+                  mock_connection.cursor.return_value = mock_cursor
+                  mock_db.return_value = mock_connection
+
+                  response = client.get("/file/content/1")
+                  assert response.status_code == 200
+                  data = response.json()
+                  assert data["content"] == "file content"
+                  assert data["filename"] == "test.txt"
+
+              @patch('main.get_db_connection')
+              def test_get_file_content_not_found(self, mock_db):
+                  mock_cursor = MagicMock()
+                  mock_cursor.fetchone.return_value = None
+                  
+                  mock_connection = MagicMock()
+                  mock_connection.cursor.return_value = mock_cursor
+                  mock_db.return_value = mock_connection
+
+                  response = client.get("/file/content/999")
+                  assert response.status_code == 404
+
+              @patch('main.get_db_connection')
+              @patch('os.remove')
+              def test_delete_file_success(self, mock_remove, mock_db):
+                  mock_cursor = MagicMock()
+                  mock_cursor.fetchone.return_value = ("/path/to/file.txt",)
+                  
+                  mock_connection = MagicMock()
+                  mock_connection.cursor.return_value = mock_cursor
+                  mock_db.return_value = mock_connection
+
+                  response = client.delete("/file/1")
+                  assert response.status_code == 200
+                  assert "deleted successfully" in response.json()["message"]
+                  mock_remove.assert_called_once_with("/path/to/file.txt")
+
+              @patch('main.get_db_connection')
+              def test_delete_file_not_found(self, mock_db):
+                  mock_cursor = MagicMock()
+                  mock_cursor.fetchone.return_value = None
+                  
+                  mock_connection = MagicMock()
+                  mock_connection.cursor.return_value = mock_cursor
+                  mock_db.return_value = mock_connection
+
+                  response = client.delete("/file/999")
+                  assert response.status_code == 404
+
+          class TestTextExtraction:
+              def test_extract_text_from_txt(self):
+                  with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                      f.write("Test content")
+                      f.flush()
+                      
+                      result = extract_text_from_file(Path(f.name), '.txt')
+                      assert result == "Test content"
+                      
+                      os.unlink(f.name)
+
+              def test_extract_text_from_json(self):
+                  test_data = {"key": "value", "number": 42}
+                  
+                  with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+                      json.dump(test_data, f)
+                      f.flush()
+                      
+                      result = extract_text_from_file(Path(f.name), '.json')
+                      assert "key" in result
+                      assert "value" in result
+                      assert "42" in result
+                      
+                      os.unlink(f.name)
+
+              def test_extract_text_from_csv(self):
+                  import csv
+                  
+                  with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, newline='') as f:
+                      writer = csv.writer(f)
+                      writer.writerow(['Name', 'Age', 'City'])
+                      writer.writerow(['John', '30', 'NYC'])
+                      writer.writerow(['Jane', '25', 'LA'])
+                      f.flush()
+                      
+                      result = extract_text_from_file(Path(f.name), '.csv')
+                      assert "Name" in result
+                      assert "John" in result
+                      assert "Jane" in result
+                      
+                      os.unlink(f.name)
+
+              def test_extract_text_unsupported_format(self):
+                  with tempfile.NamedTemporaryFile(suffix='.unknown', delete=False) as f:
+                      result = extract_text_from_file(Path(f.name), '.unknown')
+                      assert result is None
+                      
+                      os.unlink(f.name)
+
+              def test_extract_text_file_error(self):
+                  # Test with non-existent file
+                  result = extract_text_from_file(Path("/non/existent/file.txt"), '.txt')
+                  assert result is None
+
+          class TestDatabaseOperations:
+              @patch('main.get_db_connection')
+              def test_store_file_info_success(self, mock_db):
+                  mock_cursor = MagicMock()
+                  mock_cursor.lastrowid = 123
+                  
+                  mock_connection = MagicMock()
+                  mock_connection.cursor.return_value = mock_cursor
+                  mock_db.return_value = mock_connection
+
+                  result = store_file_info(
+                      session_id="test-session",
+                      filename="file.txt",
+                      original_name="original.txt",
+                      file_type=".txt",
+                      file_size=100,
+                      file_path="/path/to/file.txt",
+                      extracted_text="content"
+                  )
+                  
+                  assert result["id"] == 123
+                  assert result["has_text"] == True
+                  assert result["original_name"] == "original.txt"
+
+              @patch('main.get_db_connection')
+              def test_store_file_info_database_error(self, mock_db):
+                  mock_db.return_value = None
+
+                  with pytest.raises(Exception):
+                      store_file_info(
+                          session_id="test-session",
+                          filename="file.txt",
+                          original_name="original.txt",
+                          file_type=".txt",
+                          file_size=100,
+                          file_path="/path/to/file.txt",
+                          extracted_text="content"
+                      )
+
+          class TestPerformance:
+              def test_health_check_performance(self):
+                  import time
+                  start = time.time()
+                  response = client.get("/health")
+                  duration = time.time() - start
+                  
+                  assert response.status_code == 200
+                  assert duration < 0.5  # Should be very fast
+
+              def test_root_endpoint_performance(self):
+                  import time
+                  start = time.time()
+                  response = client.get("/")
+                  duration = time.time() - start
+                  
+                  assert response.status_code == 200
+                  assert duration < 1.0  # Should respond quickly
+
+          class TestFileValidation:
+              def test_supported_file_extensions(self):
+                  from main import ALLOWED_EXTENSIONS
+                  expected_extensions = {'.pdf', '.txt', '.docx', '.csv', '.json', '.md'}
+                  assert ALLOWED_EXTENSIONS == expected_extensions
+
+              def test_max_file_size_constant(self):
+                  from main import MAX_FILE_SIZE
+                  assert MAX_FILE_SIZE == 10 * 1024 * 1024  # 10MB
+
+              def test_file_size_validation_boundary(self):
+                  # Test with exactly max size (10MB)
+                  max_size_content = b"x" * (10 * 1024 * 1024)
+                  test_file = ("test.txt", max_size_content, "text/plain")
+                  
+                  # Should not be rejected due to size (other validations might fail)
+                  response = client.post(
+                      "/upload",
+                      files={"files": test_file},
+                      data={"session_id": "test"}
+                  )
+                  # Should not fail due to size
+                  if response.status_code == 400:
+                      assert "too large" not in response.json()["detail"]
+          EOF
+
+      - name: Run tests with coverage
+        run: |
+          pytest test_main.py -v \
+            --cov=main \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-report=html \
+            --cov-fail-under=50
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./file-service/coverage.xml
+          flags: file-service
+          name: file-service-coverage
+          fail_ci_if_error: false
+
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: test-results-${{ env.SERVICE_NAME }}-py${{ matrix.python-version }}
+          path: |
+            file-service/htmlcov/
+            file-service/coverage.xml
+            file-service/.coverage
+
+  # Build Docker Image
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: [lint, security, test]
+    if: github.event_name == 'push'
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=stable,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./file-service
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ env.SERVICE_NAME }}
+          cache-to: type=gha,mode=max,scope=${{ env.SERVICE_NAME }}
+          platforms: linux/amd64,linux/arm64
+
+      - name: Generate build summary
+        run: |
+          echo "## 🐳 Docker Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service**: ${{ env.SERVICE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: ${{ env.IMAGE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tags**: ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Digest**: ${{ steps.build.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platforms**: linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
+
+  # Container Security Scan
+  container-security:
+    name: Container Security Scan
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.event_name == 'push'
+    
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ github.ref_name }}-${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # Trigger CD Pipeline
+  trigger-cd:
+    name: Trigger CD Pipeline
+    runs-on: ubuntu-latest
+    needs: [build, container-security]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    
+    steps:
+      - name: Trigger CD workflow
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const environment = '${{ github.ref }}' === 'refs/heads/main' ? 'production' : 'staging';
+            
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'file-service-cd.yml',
+              ref: '${{ github.ref }}',
+              inputs: {
+                environment: environment,
+                image_tag: '${{ github.ref_name }}-${{ github.sha }}'
+              }
+            });
+
+  # Final Status
+  status:
+    name: CI Status
+    runs-on: ubuntu-latest
+    needs: [lint, security, test, build, container-security, trigger-cd]
+    if: always()
+    
+    steps:
+      - name: Check CI status
+        run: |
+          echo "## 🚀 CI Pipeline Results" >> $GITHUB_STEP_SUMMARY
+          echo "- **Lint**: ${{ needs.lint.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Security**: ${{ needs.security.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tests**: ${{ needs.test.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Build**: ${{ needs.build.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Container Security**: ${{ needs.container-security.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **CD Trigger**: ${{ needs.trigger-cd.result }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ needs.lint.result }}" == "success" && "${{ needs.security.result }}" == "success" && "${{ needs.test.result }}" == "success" && "${{ needs.build.result }}" == "success" ]]; then
+            echo "✅ **All CI checks passed!**" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          else
+            echo "❌ **Some CI checks failed!**" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
