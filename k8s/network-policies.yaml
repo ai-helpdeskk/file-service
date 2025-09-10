@@ -1,0 +1,37 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: file-service-network-policy
+  namespace: bedrock-chat-v2
+spec:
+  podSelector:
+    matchLabels:
+      app: file-service
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow traffic from API Gateway only
+  - from:
+    - podSelector:
+        matchLabels:
+          app: api-gateway
+    ports:
+    - protocol: TCP
+      port: 7000
+  egress:
+  # Allow communication to MySQL
+  - to:
+    - podSelector:
+        matchLabels:
+          app: mysql
+    ports:
+    - protocol: TCP
+      port: 3306
+  # Allow DNS resolution
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53

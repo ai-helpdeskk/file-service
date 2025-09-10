@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: file-service
+  namespace: bedrock-chat-v2
+  labels:
+    app: file-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: file-service
+  template:
+    metadata:
+      labels:
+        app: file-service
+    spec:
+      imagePullSecrets:
+        - name: docker-hub-secret
+      initContainers:
+      - name: fix-permissions
+        image: busybox
+        command: ['sh', '-c', 'chown -R 999:999 /app/uploads && chmod -R 755 /app/uploads']
+        volumeMounts:
+        - name: file-uploads
+          mountPath: /app/uploads
+      containers:
+        - name: file-service
+          image: samitsinghhh/file-service:v2
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 7000
+              name: http
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: DATABASE_URL
+            - name: UPLOAD_DIR
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: UPLOAD_DIR
+          volumeMounts:
+            - name: file-uploads
+              mountPath: /app/uploads
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 7000
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 7000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 7000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+      volumes:
+        - name: file-uploads
+          persistentVolumeClaim:
+            claimName: file-uploads-pvc
