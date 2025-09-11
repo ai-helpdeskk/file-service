@@ -11,8 +11,19 @@ from typing import List, Optional
 import shutil
 from pathlib import Path
 import mimetypes
-import PyPDF2
-import docx
+import time
+
+# Document processing imports
+try:
+    import PyPDF2
+except ImportError:
+    PyPDF2 = None
+
+try:
+    import docx
+except ImportError:
+    docx = None
+
 import csv
 import json
 
@@ -21,7 +32,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
-app = FastAPI(title="File Service", version="1.0.0")
+app = FastAPI(title="File Service", version="2.0.0")
 
 # Configure CORS
 app.add_middleware(
@@ -34,33 +45,39 @@ app.add_middleware(
 
 # Configuration
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/app/uploads")
-DATABASE_URL = os.getenv("DATABASE_URL", "mysql://bedrock_user:bedrock_password@mysql:3306/bedrock_chat")
+DB_HOST = os.getenv("DB_HOST", "mysql")
+DB_PORT = int(os.getenv("DB_PORT", "3306"))
+DB_USER = os.getenv("DB_USER", "bedrock_user")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "bedrock_password")
+DB_NAME = os.getenv("DB_NAME", "bedrock_chat")
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 ALLOWED_EXTENSIONS = {'.pdf', '.txt', '.docx', '.csv', '.json', '.md'}
 
 # Create upload directory
 Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
 
-# Database connection function
-def get_db_connection():
-    try:
-        # Parse DATABASE_URL
-        url_parts = DATABASE_URL.replace("mysql://", "").split("/")
-        auth_host = url_parts[0].split("@")
-        auth = auth_host[0].split(":")
-        host_port = auth_host[1].split(":")
-        
-        connection = mysql.connector.connect(
-            host=host_port[0],
-            port=int(host_port[1]) if len(host_port) > 1 else 3306,
-            user=auth[0],
-            password=auth[1],
-            database=url_parts[1]
-        )
-        return connection
-    except Error as e:
-        logger.error(f"Database connection error: {e}")
-        return None
+# Database connection with retry logic
+def get_db_connection(max_retries=5):
+    for attempt in range(max_retries):
+        try:
+            connection = mysql.connector.connect(
+                host=DB_HOST,
+                port=DB_PORT,
+                user=DB_USER,
+                password=DB_PASSWORD,
+                database=DB_NAME,
+                connect_timeout=10,
+                autocommit=True
+            )
+            if connection.is_connected():
+                return connection
+        except Error as e:
+            logger.warning(f"Database connection attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+            else:
+                logger.error(f"Database connection failed after {max_retries} attempts")
+                return None
 
 # Response models
 class UploadResponse(BaseModel):
@@ -78,38 +95,64 @@ class FileInfo(BaseModel):
 
 @app.get("/")
 async def root():
-    """Root endpoint"""
     return {
         "message": "File Service is running",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "supported_formats": list(ALLOWED_EXTENSIONS),
         "max_file_size": f"{MAX_FILE_SIZE // (1024*1024)}MB"
     }
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "service": "file-service"}
+    """Comprehensive health check"""
+    status = {"status": "healthy", "service": "file-service"}
+    
+    # Check database connectivity
+    try:
+        connection = get_db_connection(max_retries=1)
+        if connection:
+            connection.close()
+            status["database"] = "healthy"
+        else:
+            status["database"] = "unhealthy"
+            status["status"] = "degraded"
+    except:
+        status["database"] = "unhealthy"
+        status["status"] = "degraded"
+    
+    # Check upload directory
+    try:
+        upload_path = Path(UPLOAD_DIR)
+        if upload_path.exists() and upload_path.is_dir():
+            status["storage"] = "healthy"
+        else:
+            status["storage"] = "unhealthy"
+            status["status"] = "degraded"
+    except:
+        status["storage"] = "unhealthy"
+        status["status"] = "degraded"
+    
+    return status
 
 @app.post("/upload", response_model=UploadResponse)
 async def upload_files(
     files: List[UploadFile] = File(...),
     session_id: str = Form(...)
 ):
-    """
-    Upload and process files
-    """
+    """Upload and process files with enhanced error handling"""
     uploaded_files = []
     
     try:
         for file in files:
-            # Validate file
-            if file.size > MAX_FILE_SIZE:
+            # Validate file size
+            file_content = await file.read()
+            if len(file_content) > MAX_FILE_SIZE:
                 raise HTTPException(
                     status_code=400,
                     detail=f"File {file.filename} is too large. Max size is {MAX_FILE_SIZE // (1024*1024)}MB"
                 )
             
+            # Validate file extension
             file_ext = Path(file.filename).suffix.lower()
             if file_ext not in ALLOWED_EXTENSIONS:
                 raise HTTPException(
@@ -123,8 +166,7 @@ async def upload_files(
             
             # Save file
             with open(file_path, "wb") as buffer:
-                content = await file.read()
-                buffer.write(content)
+                buffer.write(file_content)
             
             # Extract text from file
             extracted_text = extract_text_from_file(file_path, file_ext)
@@ -135,7 +177,7 @@ async def upload_files(
                 filename=unique_filename,
                 original_name=file.filename,
                 file_type=file_ext,
-                file_size=file.size,
+                file_size=len(file_content),
                 file_path=str(file_path),
                 extracted_text=extracted_text
             )
@@ -153,16 +195,16 @@ async def upload_files(
         # Clean up any uploaded files on error
         for file_info in uploaded_files:
             try:
-                os.remove(file_info.get('file_path', ''))
+                file_path = file_info.get('file_path', '')
+                if file_path and os.path.exists(file_path):
+                    os.remove(file_path)
             except:
                 pass
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/files/{session_id}")
 async def get_files(session_id: str):
-    """
-    Get uploaded files for a session with their content
-    """
+    """Get uploaded files for a session with their content"""
     try:
         connection = get_db_connection()
         if not connection:
@@ -188,7 +230,7 @@ async def get_files(session_id: str):
                 "content": row[6] if row[6] else "No content available",  # extracted_text
                 "content_type": row[3],  # file_type
                 "file_size": row[4],
-                "upload_date": row[5].isoformat(),
+                "upload_date": row[5].isoformat() if hasattr(row[5], 'isoformat') else str(row[5]),
                 "has_text": bool(row[6])
             }
             files.append(file_info)
@@ -202,9 +244,7 @@ async def get_files(session_id: str):
 
 @app.get("/file/content/{file_id}")
 async def get_file_content(file_id: int):
-    """
-    Get extracted text content from a file
-    """
+    """Get extracted text content from a file"""
     try:
         connection = get_db_connection()
         if not connection:
@@ -236,9 +276,7 @@ async def get_file_content(file_id: int):
 
 @app.delete("/file/{file_id}")
 async def delete_file(file_id: int):
-    """
-    Delete a file
-    """
+    """Delete a file"""
     try:
         connection = get_db_connection()
         if not connection:
@@ -257,14 +295,14 @@ async def delete_file(file_id: int):
         
         # Delete from database
         cursor.execute("DELETE FROM uploaded_files WHERE id = %s", (file_id,))
-        connection.commit()
         
         cursor.close()
         connection.close()
         
         # Delete physical file
         try:
-            os.remove(file_path)
+            if os.path.exists(file_path):
+                os.remove(file_path)
         except FileNotFoundError:
             pass  # File already deleted
         
@@ -275,63 +313,75 @@ async def delete_file(file_id: int):
         raise HTTPException(status_code=500, detail="Failed to delete file")
 
 def extract_text_from_file(file_path: Path, file_ext: str) -> Optional[str]:
-    """
-    Extract text content from uploaded file
-    """
+    """Extract text content from uploaded file with better error handling"""
     try:
         if file_ext == '.txt' or file_ext == '.md':
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
                 logger.info(f"Extracted {len(content)} characters from text file")
                 return content
         
-        elif file_ext == '.pdf':
-            with open(file_path, 'rb') as f:
-                pdf_reader = PyPDF2.PdfReader(f)
-                text = ""
-                for page in pdf_reader.pages:
-                    text += page.extract_text() + "\n"
-                logger.info(f"Extracted {len(text)} characters from PDF")
-                return text
+        elif file_ext == '.pdf' and PyPDF2:
+            try:
+                with open(file_path, 'rb') as f:
+                    pdf_reader = PyPDF2.PdfReader(f)
+                    text = ""
+                    for page in pdf_reader.pages:
+                        text += page.extract_text() + "\n"
+                    logger.info(f"Extracted {len(text)} characters from PDF")
+                    return text
+            except Exception as e:
+                logger.error(f"PDF extraction error: {e}")
+                return "PDF content could not be extracted"
         
-        elif file_ext == '.docx':
-            doc = docx.Document(file_path)
-            text = ""
-            for paragraph in doc.paragraphs:
-                text += paragraph.text + "\n"
-            logger.info(f"Extracted {len(text)} characters from DOCX")
-            return text
+        elif file_ext == '.docx' and docx:
+            try:
+                doc = docx.Document(file_path)
+                text = ""
+                for paragraph in doc.paragraphs:
+                    text += paragraph.text + "\n"
+                logger.info(f"Extracted {len(text)} characters from DOCX")
+                return text
+            except Exception as e:
+                logger.error(f"DOCX extraction error: {e}")
+                return "DOCX content could not be extracted"
         
         elif file_ext == '.csv':
-            text = ""
-            with open(file_path, 'r', encoding='utf-8') as f:
-                csv_reader = csv.reader(f)
-                for row in csv_reader:
-                    text += ", ".join(row) + "\n"
-            logger.info(f"Extracted {len(text)} characters from CSV")
-            return text
+            try:
+                text = ""
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    csv_reader = csv.reader(f)
+                    for row in csv_reader:
+                        text += ", ".join(row) + "\n"
+                logger.info(f"Extracted {len(text)} characters from CSV")
+                return text
+            except Exception as e:
+                logger.error(f"CSV extraction error: {e}")
+                return "CSV content could not be extracted"
         
         elif file_ext == '.json':
-            with open(file_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                text = json.dumps(data, indent=2)
-                logger.info(f"Extracted {len(text)} characters from JSON")
-                return text
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    data = json.load(f)
+                    text = json.dumps(data, indent=2)
+                    logger.info(f"Extracted {len(text)} characters from JSON")
+                    return text
+            except Exception as e:
+                logger.error(f"JSON extraction error: {e}")
+                return "JSON content could not be extracted"
         
         else:
             logger.warning(f"Unsupported file extension: {file_ext}")
-            return None
+            return "File type not supported for text extraction"
             
     except Exception as e:
         logger.error(f"Error extracting text from {file_path}: {str(e)}")
-        return None
+        return "Text extraction failed"
 
 def store_file_info(session_id: str, filename: str, original_name: str, 
                    file_type: str, file_size: int, file_path: str, 
                    extracted_text: Optional[str]) -> dict:
-    """
-    Store file information in database
-    """
+    """Store file information in database with better error handling"""
     try:
         connection = get_db_connection()
         if not connection:
@@ -345,12 +395,10 @@ def store_file_info(session_id: str, filename: str, original_name: str,
         """, (session_id, filename, original_name, file_type, file_size, file_path, extracted_text))
         
         file_id = cursor.lastrowid
-        connection.commit()
-        
         cursor.close()
         connection.close()
         
-        logger.info(f"Stored file info for {original_name} (ID: {file_id}) with {len(extracted_text) if extracted_text else 0} characters of text")
+        logger.info(f"Stored file info for {original_name} (ID: {file_id})")
         
         return {
             "id": file_id,
@@ -358,7 +406,8 @@ def store_file_info(session_id: str, filename: str, original_name: str,
             "original_name": original_name,
             "file_type": file_type,
             "file_size": file_size,
-            "has_text": bool(extracted_text)
+            "has_text": bool(extracted_text),
+            "file_path": file_path
         }
         
     except Exception as e:
