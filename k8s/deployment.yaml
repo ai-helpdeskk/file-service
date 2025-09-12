@@ -2,10 +2,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: file-service
+  namespace: bedrock-chat
   labels:
     app: file-service
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: file-service
@@ -23,17 +24,19 @@ spec:
           mountPath: /app/uploads
       - name: wait-for-mysql
         image: busybox:1.35
-        command: ['sh', '-c', 'until nc -z mysql 3306; do echo waiting for mysql; sleep 2; done;']
+        command: ['sh', '-c', 'until nc -z mysql.bedrock-chat.svc.cluster.local 3306; do echo waiting for mysql; sleep 2; done;']
       containers:
       - name: file-service
-        image: your-org/file-service:latest
+        image: ghcr.io/your-org/bedrock-chat-file-service:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 7000
           name: http
         env:
         - name: DB_HOST
-          value: "mysql"
+          value: "mysql.bedrock-chat.svc.cluster.local"
+        - name: DB_PORT
+          value: "3306"
         - name: DB_USER
           valueFrom:
             secretKeyRef:
@@ -75,7 +78,7 @@ spec:
           periodSeconds: 5
         resources:
           requests:
-            memory: "256Mi"
+            memory: "512Mi"
             cpu: "200m"
           limits:
             memory: "1Gi"

@@ -27,14 +27,11 @@ except ImportError:
 import csv
 import json
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize FastAPI app
-app = FastAPI(title="File Service", version="2.0.0")
+app = FastAPI(title="File Service", version="1.0.0")
 
-# Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -56,7 +53,6 @@ ALLOWED_EXTENSIONS = {'.pdf', '.txt', '.docx', '.csv', '.json', '.md'}
 # Create upload directory
 Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
 
-# Database connection with retry logic
 def get_db_connection(max_retries=5):
     for attempt in range(max_retries):
         try:
@@ -75,11 +71,8 @@ def get_db_connection(max_retries=5):
             logger.warning(f"Database connection attempt {attempt + 1} failed: {e}")
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
-            else:
-                logger.error(f"Database connection failed after {max_retries} attempts")
-                return None
+    return None
 
-# Response models
 class UploadResponse(BaseModel):
     message: str
     files: List[dict]
@@ -97,14 +90,13 @@ class FileInfo(BaseModel):
 async def root():
     return {
         "message": "File Service is running",
-        "version": "2.0.0",
+        "version": "1.0.0",
         "supported_formats": list(ALLOWED_EXTENSIONS),
         "max_file_size": f"{MAX_FILE_SIZE // (1024*1024)}MB"
     }
 
 @app.get("/health")
 async def health_check():
-    """Comprehensive health check"""
     status = {"status": "healthy", "service": "file-service"}
     
     # Check database connectivity
@@ -139,7 +131,6 @@ async def upload_files(
     files: List[UploadFile] = File(...),
     session_id: str = Form(...)
 ):
-    """Upload and process files with enhanced error handling"""
     uploaded_files = []
     
     try:
@@ -192,7 +183,6 @@ async def upload_files(
         
     except Exception as e:
         logger.error(f"Upload error: {str(e)}")
-        # Clean up any uploaded files on error
         for file_info in uploaded_files:
             try:
                 file_path = file_info.get('file_path', '')
@@ -204,7 +194,6 @@ async def upload_files(
 
 @app.get("/files/{session_id}")
 async def get_files(session_id: str):
-    """Get uploaded files for a session with their content"""
     try:
         connection = get_db_connection()
         if not connection:
@@ -226,9 +215,9 @@ async def get_files(session_id: str):
         for row in results:
             file_info = {
                 "id": row[0],
-                "filename": row[2],  # Use original_name for display
-                "content": row[6] if row[6] else "No content available",  # extracted_text
-                "content_type": row[3],  # file_type
+                "filename": row[2],
+                "content": row[6] if row[6] else "No content available",
+                "content_type": row[3],
                 "file_size": row[4],
                 "upload_date": row[5].isoformat() if hasattr(row[5], 'isoformat') else str(row[5]),
                 "has_text": bool(row[6])
@@ -244,7 +233,6 @@ async def get_files(session_id: str):
 
 @app.get("/file/content/{file_id}")
 async def get_file_content(file_id: int):
-    """Get extracted text content from a file"""
     try:
         connection = get_db_connection()
         if not connection:
@@ -276,7 +264,6 @@ async def get_file_content(file_id: int):
 
 @app.delete("/file/{file_id}")
 async def delete_file(file_id: int):
-    """Delete a file"""
     try:
         connection = get_db_connection()
         if not connection:
@@ -284,7 +271,6 @@ async def delete_file(file_id: int):
         
         cursor = connection.cursor()
         
-        # Get file path first
         cursor.execute("SELECT file_path FROM uploaded_files WHERE id = %s", (file_id,))
         result = cursor.fetchone()
         
@@ -293,18 +279,16 @@ async def delete_file(file_id: int):
         
         file_path = result[0]
         
-        # Delete from database
         cursor.execute("DELETE FROM uploaded_files WHERE id = %s", (file_id,))
         
         cursor.close()
         connection.close()
         
-        # Delete physical file
         try:
             if os.path.exists(file_path):
                 os.remove(file_path)
         except FileNotFoundError:
-            pass  # File already deleted
+            pass
         
         return {"message": "File deleted successfully"}
         
@@ -313,7 +297,6 @@ async def delete_file(file_id: int):
         raise HTTPException(status_code=500, detail="Failed to delete file")
 
 def extract_text_from_file(file_path: Path, file_ext: str) -> Optional[str]:
-    """Extract text content from uploaded file with better error handling"""
     try:
         if file_ext == '.txt' or file_ext == '.md':
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -381,7 +364,6 @@ def extract_text_from_file(file_path: Path, file_ext: str) -> Optional[str]:
 def store_file_info(session_id: str, filename: str, original_name: str, 
                    file_type: str, file_size: int, file_path: str, 
                    extracted_text: Optional[str]) -> dict:
-    """Store file information in database with better error handling"""
     try:
         connection = get_db_connection()
         if not connection:
