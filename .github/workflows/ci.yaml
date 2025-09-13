@@ -177,5 +177,5 @@ jobs:
       - name: Trigger CD Pipeline 🚀
         run: |
           echo "✅ CI Pipeline completed successfully!"
-          echo "📦 Docker image: ${{ env.DOCKER_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          echo "📦 Docker image: samitsinghhh/file-service:${{ github.sha }}"
           echo "🎯 Next: CD pipeline will deploy to Kubernetes cluster"
