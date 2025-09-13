@@ -1,5 +1,3 @@
-# File Service Horizontal Pod Autoscaler
-# Scales file service pods based on CPU and memory utilization
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -41,5 +39,5 @@ spec:
         value: 100
         periodSeconds: 60
       - type: Pods
-        value: 2  # Can scale up faster for file processing
+        value: 2
         periodSeconds: 60
