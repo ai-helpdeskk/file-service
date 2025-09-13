@@ -17,7 +17,7 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-    
+
     - name: Set up Python
       run: |
         python3 --version || {
@@ -25,29 +25,29 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y python3 python3-pip python3-venv
         }
-        
+
         python3 -m venv venv
         source venv/bin/activate
         python --version
-    
+
     - name: Install linting dependencies
       run: |
         source venv/bin/activate
         python -m pip install --upgrade pip
         pip install flake8 black isort bandit
         pip install -r requirements.txt || echo "Requirements install had issues"
-    
+
     - name: Run flake8
       run: |
         source venv/bin/activate
         flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || echo "Flake8 critical errors check completed"
         flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics || echo "Flake8 style check completed"
-    
+
     - name: Check code formatting with black
       run: |
         source venv/bin/activate
         black --check --diff . || echo "Black formatting check completed"
-    
+
     - name: Check import sorting with isort
       run: |
         source venv/bin/activate
@@ -59,7 +59,7 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-    
+
     - name: Set up Python and run security analysis
       run: |
         python3 -m venv venv
@@ -67,11 +67,11 @@ jobs:
         python -m pip install --upgrade pip
         pip install bandit safety || echo "Security tools install completed"
         pip install -r requirements.txt || echo "Requirements install completed"
-        
+
         echo "Running Bandit security analysis..."
         bandit -r . -f json -o bandit-report.json || echo "Bandit analysis completed"
         bandit -r . -f txt || echo "Bandit analysis completed"
-        
+
         echo "Running Safety check..."
         safety check --json --output safety-report.json || echo "Safety check completed"
         safety check || echo "Safety check completed"
@@ -82,7 +82,7 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-    
+
     - name: Run Trivy vulnerability scanner
       run: |
         if ! command -v trivy &> /dev/null; then
@@ -94,7 +94,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y trivy
         fi
-        
+
         trivy fs --format table . || echo "Trivy filesystem scan completed"
 
   unit-tests:
@@ -103,7 +103,7 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-    
+
     - name: Set up Python and run tests
       run: |
         python3 -m venv venv
@@ -111,7 +111,7 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt || echo "Requirements install completed"
         pip install pytest pytest-cov pytest-asyncio httpx || echo "Test dependencies install completed"
-    
+
     - name: Create test directory and files
       run: |
         mkdir -p tests
@@ -136,7 +136,7 @@ def test_root():
 def test_health(mock_db):
     mock_connection = MagicMock()
     mock_db.return_value = mock_connection
-    
+
     response = client.get("/health")
     assert response.status_code == 200
     assert "status" in response.json()
@@ -153,13 +153,13 @@ def test_get_files_endpoint(mock_db):
     mock_cursor.fetchall.return_value = []
     mock_connection.cursor.return_value = mock_cursor
     mock_db.return_value = mock_connection
-    
+
     response = client.get("/files/test-session")
     assert response.status_code == 200
     assert "files" in response.json()
 EOF
         fi
-    
+
     - name: Run unit tests
       run: |
         source venv/bin/activate
@@ -173,7 +173,7 @@ EOF
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-    
+
     - name: Set up Docker
       run: |
         if ! docker info >/dev/null 2>&1; then
@@ -181,17 +181,17 @@ EOF
           sudo systemctl start docker || echo "Docker start failed"
           sleep 5
         fi
-        
+
         if ! docker info >/dev/null 2>&1; then
           echo "❌ Docker is not accessible"
           exit 1
         fi
         echo "✅ Docker is running"
-    
+
     - name: Log in to Container Registry
       run: |
         echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-    
+
     - name: Extract metadata
       id: meta
       run: |
@@ -202,16 +202,16 @@ EOF
           BRANCH_NAME=$(echo ${{ github.ref }} | sed 's/refs\/heads\///' | sed 's/[^a-zA-Z0-9]/-/g')
           TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${BRANCH_NAME}"
         fi
-        
+
         echo "tags=$TAGS" >> $GITHUB_OUTPUT
         echo "Generated tags: $TAGS"
-    
+
     - name: Build and push Docker image
       run: |
         IMAGE_TAG="${{ steps.meta.outputs.tags }}"
-        
+
         echo "Building Docker image: $IMAGE_TAG"
         docker build -t "$IMAGE_TAG" .
-        
+
         echo "Pushing Docker image: $IMAGE_TAG"
         docker push "$IMAGE_TAG"
