@@ -1,8 +1,8 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: file-service-netpol
-  namespace: bedrock-chat
+  name: file-service-network-policy
+  namespace: bedrock-chat-v2
 spec:
   podSelector:
     matchLabels:
