@@ -2,11 +2,12 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: file-uploads-pvc
-  namespace: bedrock-chat
+  namespace: bedrock-chat-v2
 spec:
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 10Gi
+      storage: 5Gi
   storageClassName: local-path
+  volumeMode: Filesystem
