@@ -162,7 +162,7 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
           # Update the deployment.yaml with new image tag
-          sed -i "s|image: samitsinghhh/file-service:.*|image: ${{ env.DOCKER_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}|g" k8s/deployment.yaml
+          sed -i "s|image: samitsinghhh/file-service:.*|image: samitsinghhh/file-service:${{ github.sha }}|g" k8s/deployment.yaml
           
           # Check if there are changes
           if git diff --quiet k8s/deployment.yaml; then
