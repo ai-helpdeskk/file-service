@@ -2,11 +2,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: file-service
-  namespace: bedrock-chat
+  namespace: bedrock-chat-v2
   labels:
     app: file-service
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: file-service
@@ -15,75 +15,71 @@ spec:
       labels:
         app: file-service
     spec:
+      imagePullSecrets:
+        - name: docker-hub-secret
       initContainers:
       - name: fix-permissions
         image: busybox
-        command: ['sh', '-c', 'chown -R 1000:1000 /app/uploads && chmod -R 755 /app/uploads']
+        command: ['sh', '-c', 'chown -R 999:999 /app/uploads && chmod -R 755 /app/uploads']
         volumeMounts:
         - name: file-uploads
           mountPath: /app/uploads
-      - name: wait-for-mysql
-        image: busybox:1.35
-        command: ['sh', '-c', 'until nc -z mysql.bedrock-chat.svc.cluster.local 3306; do echo waiting for mysql; sleep 2; done;']
       containers:
-      - name: file-service
-        image: ghcr.io/your-org/bedrock-chat-file-service:latest
-        imagePullPolicy: Always
-        ports:
-        - containerPort: 7000
-          name: http
-        env:
-        - name: DB_HOST
-          value: "mysql.bedrock-chat.svc.cluster.local"
-        - name: DB_PORT
-          value: "3306"
-        - name: DB_USER
-          valueFrom:
-            secretKeyRef:
-              name: mysql-secrets
-              key: MYSQL_USER
-        - name: DB_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: mysql-secrets
-              key: MYSQL_PASSWORD
-        - name: DB_NAME
-          valueFrom:
-            secretKeyRef:
-              name: mysql-secrets
-              key: MYSQL_DATABASE
-        - name: UPLOAD_DIR
-          value: "/app/uploads"
-        volumeMounts:
-        - name: file-uploads
-          mountPath: /app/uploads
-        startupProbe:
-          httpGet:
-            path: /health
-            port: 7000
-          initialDelaySeconds: 15
-          periodSeconds: 5
-          failureThreshold: 10
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 7000
-          initialDelaySeconds: 30
-          periodSeconds: 15
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 7000
-          initialDelaySeconds: 10
-          periodSeconds: 5
-        resources:
-          requests:
-            memory: "512Mi"
-            cpu: "200m"
-          limits:
-            memory: "1Gi"
-            cpu: "500m"
+        - name: file-service
+          image: samitsinghhh/file-service:v3
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 7000
+              name: http
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: DATABASE_URL
+            - name: UPLOAD_DIR
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: UPLOAD_DIR
+          volumeMounts:
+            - name: file-uploads
+              mountPath: /app/uploads
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 7000
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 7000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 7000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
       volumes:
-      - name: file-uploads
-        persistentVolumeClaim:
-          claimName: file-uploads-pvc
+        - name: file-uploads
+          persistentVolumeClaim:
+            claimName: file-uploads-pvc
