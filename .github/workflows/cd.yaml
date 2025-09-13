@@ -16,7 +16,7 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-    
+
     - name: Verify kubectl access
       run: |
         kubectl cluster-info || {
@@ -28,11 +28,11 @@ jobs:
           exit 1
         }
         echo "✅ Cluster access verified"
-    
+
     - name: Wait for infrastructure dependencies
       run: |
         echo "⏳ Waiting for infrastructure to be ready..."
-        
+
         # Wait for namespace
         echo "Checking for namespace..."
         for i in {1..30}; do
@@ -43,7 +43,7 @@ jobs:
           echo "Waiting for namespace... ($i/30)"
           sleep 10
         done
-        
+
         # Wait for MySQL secrets
         echo "Checking for MySQL secrets..."
         for i in {1..30}; do
@@ -54,11 +54,11 @@ jobs:
           echo "Waiting for MySQL secrets... ($i/30)"
           sleep 10
         done
-        
+
         # Wait for MySQL to be ready (optional)
         echo "Checking for MySQL..."
         kubectl wait --for=condition=ready pod -l app=mysql -n bedrock-chat --timeout=300s || echo "⚠️ MySQL not ready yet, but continuing..."
-        
+
         # Wait for file uploads PV
         echo "Checking for file uploads PV..."
         for i in {1..30}; do
@@ -69,20 +69,20 @@ jobs:
           echo "Waiting for file uploads PV... ($i/30)"
           sleep 10
         done
-        
+
         echo "✅ Infrastructure dependencies checked"
-    
+
     - name: Get latest image tag
       id: get-image
       run: |
         IMAGE_TAG="ghcr.io/${{ github.repository_owner }}/bedrock-chat-file-service:latest"
         echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
         echo "Using image: $IMAGE_TAG"
-    
+
     - name: Update deployment manifests
       run: |
         cd k8s
-        
+
         if [ -f deployment.yaml ]; then
           sed -i "s|image: ghcr.io/.*/bedrock-chat-file-service:.*|image: ${{ steps.get-image.outputs.image-tag }}|g" deployment.yaml
           echo "Updated deployment.yaml:"
@@ -90,45 +90,45 @@ jobs:
         else
           echo "⚠️ deployment.yaml not found"
         fi
-    
+
     - name: Deploy File Service
       run: |
         echo "🚀 Deploying File Service to Kubernetes..."
-        
+
         kubectl apply -f k8s/ -n bedrock-chat || {
           echo "⚠️ Some manifests failed to apply"
         }
-        
+
         echo "⏳ Waiting for deployment rollout..."
         kubectl rollout status deployment/file-service -n bedrock-chat --timeout=300s || {
           echo "⚠️ Deployment rollout timed out or failed"
           kubectl get pods -n bedrock-chat -l app=file-service
         }
-        
+
         echo "✅ File Service deployment process completed"
-    
+
     - name: Verify deployment
       run: |
         echo "🔍 Verifying File Service deployment..."
-        
+
         echo "Checking pods..."
         kubectl get pods -n bedrock-chat -l app=file-service -o wide || echo "No file-service pods found"
-        
+
         echo "Checking service..."
         kubectl get service file-service -n bedrock-chat || echo "No file-service service found"
-        
+
         echo "Checking PVC..."
         kubectl get pvc -n bedrock-chat || echo "No PVCs found"
-        
+
         echo "Checking recent logs..."
         kubectl logs -n bedrock-chat -l app=file-service --tail=20 || echo "No logs available"
-        
+
         echo "Testing health endpoint..."
         kubectl run test-file-service-$RANDOM --image=curlimages/curl --rm -i --restart=Never -n bedrock-chat --timeout=60s -- \
           curl -f http://file-service.bedrock-chat.svc.cluster.local:7000/health || echo "Health check completed (may have failed)"
-        
+
         echo "✅ File Service verification completed"
-    
+
     - name: Deployment summary
       run: |
         echo "🎉 **File Service Deployment Process Completed!**"
