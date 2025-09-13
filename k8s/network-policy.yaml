@@ -11,7 +11,6 @@ spec:
   - Ingress
   - Egress
   ingress:
-  # Allow traffic from API Gateway only
   - from:
     - podSelector:
         matchLabels:
@@ -20,7 +19,6 @@ spec:
     - protocol: TCP
       port: 7000
   egress:
-  # Allow communication to MySQL
   - to:
     - podSelector:
         matchLabels:
@@ -28,7 +26,6 @@ spec:
     ports:
     - protocol: TCP
       port: 3306
-  # Allow DNS resolution
   - to: []
     ports:
     - protocol: UDP
