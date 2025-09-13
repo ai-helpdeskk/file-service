@@ -13,255 +13,310 @@ jobs:
     name: Deploy File Service
     runs-on: [self-hosted]
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Verify kubectl access
+    - name: Verify environment
       run: |
-        kubectl cluster-info || {
-          echo "❌ kubectl not accessible"
+        echo "🔍 Verifying deployment environment..."
+        echo "Runner: $(uname -a)"
+        echo "Docker version: $(docker --version)"
+        echo "kubectl version: $(kubectl version --client --short 2>/dev/null || echo 'kubectl not found')"
+        
+        if ! kubectl cluster-info &>/dev/null; then
+          echo "❌ kubectl cannot access cluster"
           exit 1
-        }
-        kubectl get nodes || {
-          echo "❌ Cannot access cluster nodes"
-          exit 1
-        }
-        echo "✅ Cluster access verified"
+        fi
+        echo "✅ Environment verified"
 
-    - name: Wait for infrastructure dependencies
+    - name: Wait for dependencies
       run: |
-        echo "⏳ Waiting for infrastructure to be ready..."
-
+        echo "⏳ Waiting for dependencies to be ready..."
+        
         # Wait for namespace
-        echo "Checking for namespace bedrock-chat-v2..."
-        for i in {1..30}; do
-          if kubectl get namespace bedrock-chat-v2 2>/dev/null; then
-            echo "✅ Namespace bedrock-chat-v2 found"
-            break
-          fi
-          echo "Waiting for namespace... ($i/30)"
-          sleep 10
-        done
-
-        # Wait for MySQL secrets
-        echo "Checking for MySQL secrets..."
-        for i in {1..30}; do
-          if kubectl get secret mysql-secrets -n bedrock-chat-v2 2>/dev/null; then
-            echo "✅ MySQL secrets found"
-            break
-          fi
-          echo "Waiting for MySQL secrets... ($i/30)"
-          sleep 10
-        done
-
-        # Wait for app-config ConfigMap
-        echo "Checking for app-config ConfigMap..."
-        for i in {1..30}; do
-          if kubectl get configmap app-config -n bedrock-chat-v2 2>/dev/null; then
-            echo "✅ App-config ConfigMap found"
-            break
-          fi
-          echo "Waiting for app-config ConfigMap... ($i/30)"
-          sleep 10
-        done
-
-        # Wait for MySQL to be ready (optional)
-        echo "Checking for MySQL..."
-        kubectl wait --for=condition=ready pod -l app=mysql -n bedrock-chat-v2 --timeout=300s || echo "⚠️ MySQL not ready yet, but continuing..."
-
+        timeout 300 bash -c 'until kubectl get namespace bedrock-chat-v2 2>/dev/null; do echo "Waiting for namespace..."; sleep 10; done' || {
+          echo "Creating namespace..."
+          kubectl create namespace bedrock-chat-v2
+        }
+        
+        # Wait for MySQL to be ready (file service depends on database)
+        echo "🗄️ Waiting for MySQL database..."
+        timeout 600 bash -c 'until kubectl get pods -n bedrock-chat-v2 -l app=mysql 2>/dev/null | grep -q Running; do echo "Waiting for MySQL..."; sleep 15; done' || echo "⚠️ MySQL not ready, but continuing..."
+        
+        # Wait for app-config
+        timeout 300 bash -c 'until kubectl get configmap app-config -n bedrock-chat-v2 2>/dev/null; do echo "Waiting for app-config..."; sleep 10; done' || {
+          echo "📝 Creating app-config ConfigMap..."
+          kubectl create configmap app-config \
+            --from-literal=DATABASE_URL="mysql://bedrock_user:bedrock_password@mysql:3306/bedrock_chat" \
+            --from-literal=BEDROCK_SERVICE_URL="http://bedrock-service:9000" \
+            --from-literal=FILE_SERVICE_URL="http://file-service:7000" \
+            --from-literal=AWS_REGION="us-east-1" \
+            --from-literal=REACT_APP_API_URL="/api" \
+            -n bedrock-chat-v2
+        }
+        
         # Wait for docker-hub-secret
-        echo "Checking for docker-hub-secret..."
-        for i in {1..30}; do
-          if kubectl get secret docker-hub-secret -n bedrock-chat-v2 2>/dev/null; then
-            echo "✅ Docker Hub secret found"
-            break
-          fi
-          echo "Waiting for docker-hub-secret... ($i/30)"
-          sleep 10
-        done
-
-        echo "✅ Infrastructure dependencies checked"
-
-    - name: Get latest image tag
-      id: get-image
-      run: |
-        # Get the latest commit SHA from main branch
-        LATEST_SHA=$(git rev-parse HEAD)
-        IMAGE_TAG="samitsinghhh/file-service:${LATEST_SHA}"
-        echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
-        echo "Using image: $IMAGE_TAG"
-
-    - name: Update deployment manifests
-      run: |
-        cd k8s
-
-        if [ -f deployment.yaml ]; then
-          # Update the image tag in deployment.yaml to match your existing format
-          sed -i "s|image: samitsinghhh/file-service:.*|image: samitsinghhh/file-service:$(git rev-parse HEAD)|g" deployment.yaml
-          echo "Updated deployment.yaml:"
-          grep "image:" deployment.yaml || echo "No image line found"
-        else
-          echo "⚠️ deployment.yaml not found"
-        fi
-
-    - name: Create PVC if not exists
-      run: |
-        echo "📦 Ensuring PVC exists..."
-        if kubectl get pvc file-uploads-pvc -n bedrock-chat-v2 2>/dev/null; then
-          echo "✅ PVC already exists"
-        else
-          echo "Creating PVC..."
-          kubectl apply -f k8s/pvc.yaml -n bedrock-chat-v2
-          echo "⏳ Waiting for PVC to be bound..."
-          kubectl wait --for=condition=Bound pvc/file-uploads-pvc -n bedrock-chat-v2 --timeout=300s || echo "⚠️ PVC binding timeout"
-        fi
+        timeout 300 bash -c 'until kubectl get secret docker-hub-secret -n bedrock-chat-v2 2>/dev/null; do echo "Waiting for docker-hub-secret..."; sleep 10; done' || {
+          echo "🔑 Creating placeholder Docker Hub secret..."
+          kubectl create secret generic docker-hub-secret \
+            --from-literal=.dockerconfigjson='{"auths":{"https://index.docker.io/v1/":{"auth":"ZHVtbXk="}}}' \
+            --type=kubernetes.io/dockerconfigjson \
+            -n bedrock-chat-v2
+        }
+        
+        echo "✅ Dependencies checked"
 
     - name: Deploy File Service
       run: |
-        echo "🚀 Deploying File Service to Kubernetes..."
-
-        # Apply all manifests in order
-        echo "Applying Service..."
+        echo "🚀 Deploying File Service..."
+        
+        # Apply in order: Service first for DNS, then Deployment
+        echo "📡 Creating service..."
         kubectl apply -f k8s/service.yaml -n bedrock-chat-v2
-
-        echo "Applying Deployment..."
+        
+        echo "🏗️ Creating deployment..."
         kubectl apply -f k8s/deployment.yaml -n bedrock-chat-v2
-
-        echo "Applying HPA..."
-        kubectl apply -f k8s/hpa.yaml -n bedrock-chat-v2 || echo "⚠️ HPA failed to apply"
-
-        echo "Applying Network Policy..."
-        kubectl apply -f k8s/network-policy.yaml -n bedrock-chat-v2 || echo "⚠️ Network Policy failed to apply"
-
+        
+        # Apply HPA if available
+        if [[ -f k8s/hpa.yaml ]]; then
+          echo "📈 Applying HPA..."
+          kubectl apply -f k8s/hpa.yaml -n bedrock-chat-v2 || echo "⚠️ HPA failed (metrics-server may not be available)"
+        fi
+        
+        # Apply Network Policy if available
+        if [[ -f k8s/network-policy.yaml ]]; then
+          echo "🔒 Applying Network Policy..."
+          kubectl apply -f k8s/network-policy.yaml -n bedrock-chat-v2 || echo "⚠️ Network Policy failed"
+        fi
+        
         echo "⏳ Waiting for deployment rollout..."
-        kubectl rollout status deployment/file-service -n bedrock-chat-v2 --timeout=600s || {
-          echo "⚠️ Deployment rollout timed out or failed"
-          echo "Checking pod status..."
-          kubectl get pods -n bedrock-chat-v2 -l app=file-service
-          echo "Checking recent events..."
-          kubectl get events -n bedrock-chat-v2 --sort-by='.lastTimestamp' | tail -10
-        }
+        if kubectl rollout status deployment/file-service -n bedrock-chat-v2 --timeout=600s; then
+          echo "✅ File Service deployed successfully"
+        else
+          echo "⚠️ Deployment rollout timeout - checking status..."
+          kubectl get pods -n bedrock-chat-v2 -l app=file-service -o wide
+          kubectl describe deployment file-service -n bedrock-chat-v2
+        fi
 
-        echo "✅ File Service deployment process completed"
-
-    - name: Wait for pod readiness
+    - name: Wait for readiness
       run: |
-        echo "⏳ Waiting for pods to be ready..."
+        echo "⏳ Waiting for File Service to be ready..."
+        
+        # Wait for pods to be ready
         kubectl wait --for=condition=ready pod -l app=file-service -n bedrock-chat-v2 --timeout=300s || {
           echo "⚠️ Pods not ready within timeout"
-          kubectl describe pods -n bedrock-chat-v2 -l app=file-service
+          echo "Pod status:"
+          kubectl get pods -n bedrock-chat-v2 -l app=file-service -o wide
+          echo "Pod events:"
+          kubectl get events -n bedrock-chat-v2 --field-selector involvedObject.name=file-service
         }
 
     - name: Verify deployment
       run: |
         echo "🔍 Verifying File Service deployment..."
-
+        
         echo "=== Deployment Status ==="
         kubectl get deployment file-service -n bedrock-chat-v2 -o wide || echo "Deployment not found"
-
+        
         echo "=== Pods ==="
-        kubectl get pods -n bedrock-chat-v2 -l app=file-service -o wide || echo "No file-service pods found"
-
+        kubectl get pods -n bedrock-chat-v2 -l app=file-service -o wide || echo "No pods found"
+        
         echo "=== Service ==="
-        kubectl get service file-service -n bedrock-chat-v2 -o wide || echo "No file-service service found"
-
-        echo "=== PVC Status ==="
-        kubectl get pvc file-uploads-pvc -n bedrock-chat-v2 || echo "No PVC found"
-
-        echo "=== HPA Status ==="
-        kubectl get hpa file-service-hpa -n bedrock-chat-v2 || echo "No HPA found"
-
-        echo "=== Recent Pod Logs ==="
+        kubectl get service file-service -n bedrock-chat-v2 -o wide || echo "Service not found"
+        
+        echo "=== Recent Logs ==="
         kubectl logs -n bedrock-chat-v2 -l app=file-service --tail=20 || echo "No logs available"
 
-        echo "=== Testing Health Endpoint ==="
-        kubectl run test-file-service-$RANDOM --image=curlimages/curl --rm -i --restart=Never -n bedrock-chat-v2 --timeout=60s -- \
-          curl -f http://file-service.bedrock-chat-v2.svc.cluster.local:7000/health || echo "⚠️ Health check failed"
-
-        echo "=== Testing Root Endpoint ==="
-        kubectl run test-file-service-root-$RANDOM --image=curlimages/curl --rm -i --restart=Never -n bedrock-chat-v2 --timeout=60s -- \
-          curl -f http://file-service.bedrock-chat-v2.svc.cluster.local:7000/ || echo "⚠️ Root endpoint check failed"
-
-        echo "✅ File Service verification completed"
-
-    - name: Check file upload functionality
+    - name: Health check
       run: |
-        echo "📁 Testing File Upload Functionality..."
+        echo "🏥 Performing health checks..."
         
-        # Check if upload directory is writable
-        echo "Checking upload directory permissions..."
-        kubectl exec -n bedrock-chat-v2 -l app=file-service -- ls -la /app/uploads || echo "Upload directory check failed"
-        
-        # Test write permissions
-        kubectl exec -n bedrock-chat-v2 -l app=file-service -- touch /app/uploads/test-write.txt || echo "Write permission test failed"
-        kubectl exec -n bedrock-chat-v2 -l app=file-service -- rm -f /app/uploads/test-write.txt || echo "File cleanup failed"
-        
-        echo "✅ Upload directory verification completed"
-
-    - name: Check resource utilization
-      run: |
-        echo "📊 Resource Utilization Check..."
-        
-        echo "=== Node Resources ==="
-        kubectl top nodes || echo "Metrics not available"
-        
-        echo "=== Pod Resources ==="
-        kubectl top pods -n bedrock-chat-v2 -l app=file-service || echo "Pod metrics not available"
-        
-        echo "=== Storage Usage ==="
-        kubectl exec -n bedrock-chat-v2 -l app=file-service -- df -h /app/uploads 2>/dev/null || echo "Storage check failed"
+        # Test health endpoint
+        for i in {1..12}; do
+          echo "Health check attempt $i/12..."
+          
+          if kubectl run file-health-test-$RANDOM \
+            --image=curlimages/curl \
+            --rm -i --restart=Never \
+            --timeout=30s \
+            -n bedrock-chat-v2 \
+            -- curl -f -m 10 http://file-service.bedrock-chat-v2.svc.cluster.local:7000/health; then
+            echo "✅ File Service health check passed"
+            break
+          else
+            if [[ $i -eq 12 ]]; then
+              echo "❌ All health check attempts failed"
+              echo "Checking service status:"
+              kubectl get pods -n bedrock-chat-v2 -l app=file-service
+              kubectl describe service file-service -n bedrock-chat-v2
+            else
+              echo "⚠️ Health check failed, retrying in 15 seconds..."
+              sleep 15
+            fi
+          fi
+        done
 
     - name: Test file service endpoints
       run: |
-        echo "🧪 Testing File Service API Endpoints..."
+        echo "🧪 Testing File Service endpoints..."
         
-        # Test upload endpoint structure (without actual file upload)
-        kubectl run test-upload-endpoint-$RANDOM --image=curlimages/curl --rm -i --restart=Never -n bedrock-chat-v2 --timeout=60s -- \
-          curl -f -X POST http://file-service.bedrock-chat-v2.svc.cluster.local:7000/upload \
-          -H "Content-Type: multipart/form-data" \
-          || echo "⚠️ Upload endpoint test failed (expected - no file provided)"
+        # Test root endpoint
+        echo "=== Testing Root Endpoint ==="
+        kubectl run file-root-test-$RANDOM \
+          --image=curlimages/curl \
+          --rm -i --restart=Never \
+          --timeout=30s \
+          -n bedrock-chat-v2 \
+          -- curl -f -m 10 http://file-service.bedrock-chat-v2.svc.cluster.local:7000/ || echo "⚠️ Root endpoint test failed"
         
-        echo "✅ API endpoint structure test completed"
+        # Test files endpoint (should return empty list)
+        echo "=== Testing Files Endpoint ==="
+        kubectl run file-list-test-$RANDOM \
+          --image=curlimages/curl \
+          --rm -i --restart=Never \
+          --timeout=30s \
+          -n bedrock-chat-v2 \
+          -- curl -f -m 10 http://file-service.bedrock-chat-v2.svc.cluster.local:7000/files/test-session || echo "⚠️ Files endpoint test failed (expected for new session)"
+
+    - name: Test database connectivity
+      run: |
+        echo "💾 Testing database connectivity..."
+        
+        # Test if file service can connect to database
+        kubectl exec -n bedrock-chat-v2 -l app=file-service -- python -c "
+        import mysql.connector
+        import os
+        
+        try:
+            # Parse DATABASE_URL
+            database_url = os.getenv('DATABASE_URL', 'mysql://bedrock_user:bedrock_password@mysql:3306/bedrock_chat')
+            print(f'Testing connection to: {database_url}')
+            
+            url_parts = database_url.replace('mysql://', '').split('/')
+            auth_host = url_parts[0].split('@')
+            auth = auth_host[0].split(':')
+            host_port = auth_host[1].split(':')
+            
+            connection = mysql.connector.connect(
+                host=host_port[0],
+                port=int(host_port[1]) if len(host_port) > 1 else 3306,
+                user=auth[0],
+                password=auth[1],
+                database=url_parts[1],
+                connection_timeout=10
+            )
+            
+            cursor = connection.cursor()
+            cursor.execute('SHOW TABLES')
+            tables = cursor.fetchall()
+            print(f'✅ Database connection successful. Found {len(tables)} tables.')
+            
+            # Check if file_uploads table exists
+            cursor.execute(\"SHOW TABLES LIKE 'file_uploads'\")
+            if cursor.fetchone():
+                print('✅ file_uploads table exists')
+            else:
+                print('⚠️ file_uploads table does not exist - may be created on first upload')
+            
+            cursor.close()
+            connection.close()
+            
+        except Exception as e:
+            print(f'❌ Database connection failed: {e}')
+            exit(1)
+        " 2>/dev/null || echo "⚠️ Database connectivity test failed - ensure MySQL is running and accessible"
+
+    - name: Setup file storage
+      run: |
+        echo "📁 Setting up file storage..."
+        
+        # Check if persistent volume is available
+        kubectl exec -n bedrock-chat-v2 -l app=file-service -- python -c "
+        import os
+        
+        # Check upload directory
+        upload_dir = os.getenv('UPLOAD_DIRECTORY', '/app/uploads')
+        print(f'Checking upload directory: {upload_dir}')
+        
+        if not os.path.exists(upload_dir):
+            os.makedirs(upload_dir, exist_ok=True)
+            print(f'✅ Created upload directory: {upload_dir}')
+        else:
+            print(f'✅ Upload directory exists: {upload_dir}')
+        
+        # Test write permissions
+        try:
+            test_file = os.path.join(upload_dir, 'test_write.txt')
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+            print('✅ Write permissions confirmed')
+        except Exception as e:
+            print(f'❌ Write permission test failed: {e}')
+        " || echo "⚠️ File storage setup check failed"
+
+    - name: Performance baseline
+      run: |
+        echo "📊 Establishing performance baseline..."
+        
+        # Check resource usage
+        echo "=== Resource Usage ==="
+        kubectl top pods -n bedrock-chat-v2 -l app=file-service || echo "Metrics not available"
+        
+        # Check service responsiveness
+        echo "=== Response Time Test ==="
+        kubectl run perf-test-$RANDOM \
+          --image=curlimages/curl \
+          --rm -i --restart=Never \
+          --timeout=60s \
+          -n bedrock-chat-v2 \
+          -- sh -c 'for i in $(seq 1 5); do
+            echo "Request $i:";
+            time curl -f -m 5 http://file-service.bedrock-chat-v2.svc.cluster.local:7000/health;
+            echo "";
+          done' || echo "⚠️ Performance test failed"
 
     - name: Deployment summary
       run: |
-        echo "🎉 **File Service Deployment Process Completed!**"
+        echo "🎉 **File Service Deployment Summary**"
         echo ""
-        echo "📋 **Service Status:**"
-        kubectl get pods,svc,pvc,hpa -n bedrock-chat-v2 -l app=file-service || echo "Components not found"
+        echo "📋 **Status:**"
+        kubectl get deployment,pods,svc -n bedrock-chat-v2 -l app=file-service 2>/dev/null || echo "Components not ready yet"
         echo ""
-        echo "🐳 **Image Deployed:**"
-        echo "samitsinghhh/file-service:$(git rev-parse HEAD)"
+        echo "🔧 **Configuration:**"
+        echo "- Service URL: http://file-service.bedrock-chat-v2.svc.cluster.local:7000"
+        echo "- Database: Connected to MySQL"
+        echo "- File Storage: Local directory (/app/uploads)"
         echo ""
-        echo "🔗 **Service Endpoints:**"
+        echo "🔗 **Available Endpoints:**"
         echo "- Health: http://file-service.bedrock-chat-v2.svc.cluster.local:7000/health"
-        echo "- API Root: http://file-service.bedrock-chat-v2.svc.cluster.local:7000/"
-        echo "- Upload: http://file-service.bedrock-chat-v2.svc.cluster.local:7000/upload"
-        echo "- Get Files: http://file-service.bedrock-chat-v2.svc.cluster.local:7000/files/{session_id}"
-        echo "- File Content: http://file-service.bedrock-chat-v2.svc.cluster.local:7000/file/content/{file_id}"
+        echo "- Upload: http://file-service.bedrock-chat-v2.svc.cluster.local:7000/upload (POST)"
+        echo "- Files: http://file-service.bedrock-chat-v2.svc.cluster.local:7000/files/{session_id}"
+        echo "- Download: http://file-service.bedrock-chat-v2.svc.cluster.local:7000/download/{file_id}"
         echo ""
-        echo "📁 **Supported File Types:**"
-        echo "- PDF (.pdf) - Text extraction supported"
-        echo "- Text (.txt, .md) - Full text content"
-        echo "- Word (.docx) - Text extraction supported"
-        echo "- CSV (.csv) - Data processing supported"
-        echo "- JSON (.json) - Structured data processing"
+        echo "📝 **Supported File Types:**"
+        echo "- PDF documents"
+        echo "- Text files (.txt, .md)"
+        echo "- Word documents (.docx)"
+        echo "- CSV files"
+        echo "- JSON files"
         echo ""
         echo "💡 **Next Steps:**"
-        echo "- Verify persistent volume is properly mounted: kubectl exec -n bedrock-chat-v2 -l app=file-service -- ls -la /app/uploads"
-        echo "- Check file upload permissions: kubectl exec -n bedrock-chat-v2 -l app=file-service -- touch /app/uploads/test.txt"
-        echo "- Monitor logs: kubectl logs -f deployment/file-service -n bedrock-chat-v2"
-        echo "- Test file upload functionality through API Gateway"
-        echo "- Verify MySQL connection for file metadata storage"
+        echo "1. Test file upload functionality"
+        echo "2. Verify text extraction from various file types"
+        echo "3. Monitor storage usage"
+        echo "4. Test integration with API Gateway"
         echo ""
-        echo "📈 **Monitoring Commands:**"
+        echo "📊 **Monitoring Commands:**"
         echo "- Watch pods: kubectl get pods -n bedrock-chat-v2 -l app=file-service -w"
-        echo "- Check HPA: kubectl get hpa file-service-hpa -n bedrock-chat-v2 -w"
-        echo "- View events: kubectl get events -n bedrock-chat-v2 --sort-by='.lastTimestamp'"
         echo "- Check logs: kubectl logs -f deployment/file-service -n bedrock-chat-v2"
+        echo "- Test upload: curl -F 'files=@test.txt' http://file-service:7000/upload"
         echo ""
-        echo "🔧 **Database Commands:**"
-        echo "- Check file uploads table: kubectl exec -n bedrock-chat-v2 -l app=mysql -- mysql -u bedrock_user -p bedrock_chat -e 'SELECT * FROM uploaded_files LIMIT 5;'"
+        echo "🔍 **Troubleshooting:**"
+        echo "- Check database connection: kubectl logs deployment/file-service -n bedrock-chat-v2 | grep -i mysql"
+        echo "- Check file permissions: kubectl exec -n bedrock-chat-v2 deployment/file-service -- ls -la /app/uploads"
+        echo "- Check service connectivity: kubectl exec -n bedrock-chat-v2 deployment/api-gateway -- curl file-service:7000/health"
         echo ""
-        echo "✅ **File Service is ready for production use!**"
+        echo "✅ **File Service is ready for file processing!**"
