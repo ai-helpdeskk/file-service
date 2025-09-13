@@ -26,7 +26,7 @@ spec:
           mountPath: /app/uploads
       containers:
         - name: file-service
-          image: samitsinghhh/file-service:v3
+          image: samitsinghhh/file-service:cf38c4432246a4745ed364b0f831d74c9dabefc8
           imagePullPolicy: Always
           ports:
             - containerPort: 7000
